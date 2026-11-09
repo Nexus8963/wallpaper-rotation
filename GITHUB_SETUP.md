@@ -19,7 +19,7 @@ Dit projekt er klar til at blive pushet til GitHub! Her er step-by-step instrukt
 Når du har oprettet repositoryet, vil GitHub vise dig instruktioner. Kør disse kommandoer:
 
 ```bash
-cd /home/hitch/wallpaper-rotation
+cd /home/hitch/Skrivebord/Skrivebord_billeder
 
 # Tilføj GitHub som remote
 git remote add origin https://github.com/Nexus8963/wallpaper-rotation.git

@@ -1,178 +1,76 @@
 # Multi-Monitor Wallpaper Rotator
 
-Automatically rotate different wallpapers on each connected monitor every 10 minutes. Perfect for Linux desktops running Cinnamon, GNOME, KDE, XFCE, and other desktop environments.
+Rotate different local images across Cinnamon monitors on X11, every ten minutes
+by default. The program detects the position and resolution of each active
+monitor and creates one combined image, displayed using Cinnamon's `spanned`
+background setting. Images are cropped to fill each monitor.
 
-## Features
-
-✨ **Multi-Monitor Support** - Each monitor can display a different wallpaper
-⏰ **Configurable Rotation** - Default 10 minutes, easily customizable
-🎨 **Flexible Image Sources** - Supports JPG, PNG, BMP, and GIF formats
-🚀 **Auto-Start** - Launches automatically at login via systemd
-📋 **Logging** - Detailed logs for debugging and monitoring
-⚙️ **Easy Configuration** - Simple JSON config file
-🐧 **Linux Native** - Built with standard Linux tools (xrandr, gsettings, etc.)
+At least one distinct image file is required per monitor. Duplicate files with
+identical contents count as one image. Mirrored or overlapping monitors cannot
+display different wallpapers using this method. The program logs errors and
+retries at the next interval. Disable Cinnamon's own wallpaper slideshow to
+prevent it from overriding the rotation.
 
 ## Requirements
 
-- Linux system with X11 or Wayland
-- Python 3.6+
-- `xrandr` (usually pre-installed)
-- One of: `feh`, `nitrogen`, `gsettings` (for wallpaper setting)
+- Cinnamon on X11 (other desktop environments and Wayland are not supported)
+- Python 3.8 or later and Pillow 9.1 or later
+- `xrandr`, `gsettings` and systemd user services
 
-### Installation of dependencies
+On Debian/Ubuntu/Linux Mint install the dependencies with:
 
-**Ubuntu/Debian:**
 ```bash
-sudo apt install xrandr feh nitrogen python3
-```
-
-**Fedora:**
-```bash
-sudo dnf install xrandr feh nitrogen python3
-```
-
-**Arch:**
-```bash
-sudo pacman -S xrandr feh nitrogen python3
+sudo apt install python3 python3-pil x11-xserver-utils libglib2.0-bin
 ```
 
 ## Installation
 
-1. Clone the repository:
 ```bash
 git clone https://github.com/Nexus8963/wallpaper-rotation.git
 cd wallpaper-rotation
-```
-
-2. Make the install script executable:
-```bash
-chmod +x install.sh
-```
-
-3. Run the installation script:
-```bash
 ./install.sh
 ```
 
-The script will:
-- Copy the Python script to `~/.local/bin/wallpaper-rotator`
-- Install the systemd service to `~/.config/systemd/user/wallpaper-rotator.service`
-- Create a configuration file at `~/.config/wallpaper-rotation/config.json`
-- Enable the service to start at login
-- Optionally start the service immediately
+The installer copies the program to `~/.local/bin`, creates a configuration
+file if needed, and enables the systemd user service for login. Start or
+restart it with `systemctl --user restart wallpaper-rotator`. The program
+applies a wallpaper immediately, then repeats at the configured interval.
 
 ## Configuration
 
-Edit `~/.config/wallpaper-rotation/config.json` to customize:
+Edit `~/.config/wallpaper-rotation/config.json`:
 
 ```json
 {
-  "wallpaper_dir": "/path/to/your/wallpapers",
+  "wallpaper_dir": "/path/to/your/images",
   "rotation_interval": 600,
   "supported_formats": [".jpg", ".jpeg", ".png", ".bmp", ".gif"]
 }
 ```
 
-**Parameters:**
-- `wallpaper_dir`: Path to your wallpaper directory
-- `rotation_interval`: Time in seconds between rotations (600 = 10 minutes)
-- `supported_formats`: Image formats to include in rotation
+Paths are case-sensitive. Restart the service after changes:
+`systemctl --user restart wallpaper-rotator`.
 
-## Usage
+## Status and troubleshooting
 
-### Start the service:
 ```bash
-systemctl --user start wallpaper-rotator
+python3 test_system.py
+systemctl --user status wallpaper-rotator --no-pager
+journalctl --user -u wallpaper-rotator -n 50 --no-pager
 ```
 
-### Stop the service:
-```bash
-systemctl --user stop wallpaper-rotator
-```
-
-### Check status:
-```bash
-systemctl --user status wallpaper-rotator
-```
-
-### View logs:
-```bash
-journalctl --user -u wallpaper-rotator -f
-```
-
-### Restart after config changes:
-```bash
-systemctl --user restart wallpaper-rotator
-```
-
-## Logs
-
-Logs are stored at: `~/.local/share/wallpaper-rotation/rotator.log`
+The combined wallpapers and log are stored in
+`~/.local/share/wallpaper-rotation/`. If images do not change, verify that the
+directory exists, contains enough distinct readable images, Cinnamon's slideshow
+is disabled, and the monitors are configured as an extended desktop.
 
 ## Uninstallation
 
-To remove the wallpaper rotator:
-
-```bash
-# Stop and disable the service
-systemctl --user stop wallpaper-rotator
-systemctl --user disable wallpaper-rotator
-
-# Remove files
-rm ~/.local/bin/wallpaper-rotator
-rm ~/.config/systemd/user/wallpaper-rotator.service
-
-# Optional: Remove config and logs
-rm -rf ~/.config/wallpaper-rotation
-rm -rf ~/.local/share/wallpaper-rotation
-```
-
-## How it works
-
-1. **Monitor Detection**: Uses `xrandr` to detect connected monitors
-2. **Image Selection**: Randomly selects images from your wallpaper directory
-3. **Wallpaper Setting**: Uses available tools (feh, nitrogen, gsettings) to set wallpapers
-4. **Rotation**: Repeats every configured interval (default: 10 minutes)
-5. **Auto-Start**: Systemd service ensures it starts automatically at login
-
-## Desktop Environment Support
-
-- ✅ **Cinnamon** - Full support (primary)
-- ✅ **GNOME** - Full support
-- ✅ **KDE Plasma** - Good support
-- ✅ **XFCE** - Good support
-- ✅ **MATE** - Good support
-- ✅ **i3/sway** - Supported via feh/nitrogen
-
-## Troubleshooting
-
-### Service won't start
-```bash
-journalctl --user -u wallpaper-rotator -n 50
-```
-
-### Wallpapers not rotating
-- Ensure wallpaper directory exists and contains images
-- Check that at least one wallpaper tool is installed (feh, nitrogen, etc.)
-- Verify configuration path is correct in `config.json`
-
-### Only one monitor gets wallpaper
-This is normal behavior - each monitor gets a random wallpaper from your directory.
-
-### Permission denied errors
-Make sure the script is executable:
-```bash
-chmod +x ~/.local/bin/wallpaper-rotator
-```
+Stop and disable the service with `systemctl --user disable --now wallpaper-rotator`,
+then remove `~/.local/bin/wallpaper-rotator` and
+`~/.config/systemd/user/wallpaper-rotator.service`. Configuration and generated
+images may be removed separately. Choose a new background in Cinnamon's settings.
 
 ## License
 
-This project is licensed under the MIT License - see LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Author
-
-Created with ❤️ for Linux desktop enthusiasts.
+MIT; see [LICENSE](LICENSE).

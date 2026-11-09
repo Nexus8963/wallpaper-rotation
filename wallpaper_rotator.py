@@ -1,212 +1,180 @@
 #!/usr/bin/env python3
-"""
-Multi-Monitor Wallpaper Rotator
-Rotates different wallpapers on each monitor every 10 minutes.
-Compatible with Cinnamon and other Linux desktop environments.
-"""
+"""Rotate distinct wallpapers across Cinnamon monitors on X11."""
 
-import os
-import sys
+import hashlib
 import json
-import random
-import subprocess
 import logging
-from pathlib import Path
-from datetime import datetime
+import random
+import re
+import subprocess
+import sys
 import time
-import signal
+from dataclasses import dataclass
+from pathlib import Path
 
-# Setup logging
-log_file = Path.home() / ".local/share/wallpaper-rotation/rotator.log"
-log_file.parent.mkdir(parents=True, exist_ok=True)
+from PIL import Image, ImageOps
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
+SCHEMA = "org.cinnamon.desktop.background"
+DEFAULT_FORMATS = [".jpg", ".jpeg", ".png", ".bmp", ".gif"]
+GEOMETRY = re.compile(r"^(\S+) connected (?:primary )?(\d+)x(\d+)\+(\d+)\+(\d+)(?:\s|$)")
+
+
+@dataclass(frozen=True)
+class Monitor:
+    name: str
+    width: int
+    height: int
+    x: int
+    y: int
+
+
+def parse_monitors(output):
+    monitors = []
+    for line in output.splitlines():
+        match = GEOMETRY.match(line)
+        if match:
+            name, width, height, x, y = match.groups()
+            monitors.append(Monitor(name, int(width), int(height), int(x), int(y)))
+    if not monitors:
+        raise ValueError("No active X11 monitors found in xrandr output")
+    for i, first in enumerate(monitors):
+        for second in monitors[i + 1:]:
+            if (first.x < second.x + second.width and second.x < first.x + first.width
+                    and first.y < second.y + second.height and second.y < first.y + first.height):
+                raise ValueError(f"Monitors {first.name} and {second.name} overlap; distinct backgrounds require an extended desktop")
+    return monitors
+
+
+def select_wallpapers(monitors, wallpapers, previous):
+    """Choose distinct images and avoid each monitor's previous image when possible."""
+    if len(wallpapers) < len(monitors):
+        raise ValueError(f"Need at least {len(monitors)} distinct images; found {len(wallpapers)}")
+    candidates = {monitor.name: random.sample(wallpapers, len(wallpapers)) for monitor in monitors}
+    assigned = {}
+
+    def assign(index, avoid_previous):
+        if index == len(monitors):
+            return True
+        monitor = monitors[index]
+        for image in candidates[monitor.name]:
+            if image in assigned.values() or (avoid_previous and image == previous.get(monitor.name)):
+                continue
+            assigned[monitor.name] = image
+            if assign(index + 1, avoid_previous):
+                return True
+            del assigned[monitor.name]
+        return False
+
+    if not assign(0, True):
+        logger.warning("Not enough choices to change every monitor's previous image")
+        if not assign(0, False):
+            raise ValueError("Could not select distinct images")
+    return assigned
 
 
 class WallpaperRotator:
     def __init__(self, config_file=None):
-        """Initialize the wallpaper rotator with configuration."""
         self.config_file = config_file or Path.home() / ".config/wallpaper-rotation/config.json"
-        self.rotation_interval = 600  # 10 minutes in seconds
+        self.output_dir = Path.home() / ".local/share/wallpaper-rotation"
+        self.previous = {}
         self.load_config()
-        self.setup_signal_handlers()
 
     def load_config(self):
-        """Load configuration from JSON file."""
-        try:
-            if self.config_file.exists():
-                with open(self.config_file, 'r') as f:
-                    config = json.load(f)
-                    self.wallpaper_dir = Path(config.get('wallpaper_dir', str(Path.home() / 'wallpapers')))
-                    self.rotation_interval = config.get('rotation_interval', 600)
-                    logger.info(f"Configuration loaded from {self.config_file}")
-            else:
-                self.wallpaper_dir = Path.home() / 'wallpapers'
-                logger.warning(f"Config file not found at {self.config_file}. Using default wallpaper directory: {self.wallpaper_dir}")
-                self.create_default_config()
-        except Exception as e:
-            logger.error(f"Error loading config: {e}")
-            self.wallpaper_dir = Path.home() / 'wallpapers'
-
-    def create_default_config(self):
-        """Create a default configuration file."""
-        try:
+        if self.config_file.exists():
+            with self.config_file.open(encoding="utf-8") as file:
+                config = json.load(file)
+        else:
+            config = {"wallpaper_dir": str(Path.home() / "wallpapers"),
+                      "rotation_interval": 600, "supported_formats": DEFAULT_FORMATS}
             self.config_file.parent.mkdir(parents=True, exist_ok=True)
-            default_config = {
-                "wallpaper_dir": str(self.wallpaper_dir),
-                "rotation_interval": self.rotation_interval,
-                "supported_formats": [".jpg", ".jpeg", ".png", ".bmp", ".gif"]
-            }
-            with open(self.config_file, 'w') as f:
-                json.dump(default_config, f, indent=2)
-            logger.info(f"Default configuration created at {self.config_file}")
-        except Exception as e:
-            logger.error(f"Error creating default config: {e}")
+            self.config_file.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        self.wallpaper_dir = Path(config.get("wallpaper_dir", str(Path.home() / "wallpapers"))).expanduser()
+        self.rotation_interval = config.get("rotation_interval", 600)
+        self.supported_formats = config.get("supported_formats", DEFAULT_FORMATS)
+        if (not isinstance(self.rotation_interval, (int, float))
+                or isinstance(self.rotation_interval, bool) or self.rotation_interval <= 0):
+            raise ValueError("rotation_interval must be a positive number")
+        if not isinstance(self.supported_formats, list) or not all(
+                isinstance(ext, str) and ext.startswith(".") for ext in self.supported_formats):
+            raise ValueError("supported_formats must be a list of extensions starting with a dot")
+        self.supported_formats = {ext.lower() for ext in self.supported_formats}
 
     def get_monitors(self):
-        """Get list of connected monitors."""
-        try:
-            result = subprocess.run(['xrandr', '--query'], capture_output=True, text=True)
-            monitors = []
-            for line in result.stdout.split('\n'):
-                if ' connected' in line and '(' in line:
-                    monitor_name = line.split()[0]
-                    monitors.append(monitor_name)
-            logger.info(f"Detected {len(monitors)} monitor(s): {monitors}")
-            return monitors
-        except Exception as e:
-            logger.error(f"Error detecting monitors: {e}")
-            return ['HDMI-1']  # Fallback to single monitor
+        result = subprocess.run(["xrandr", "--query"], check=True, capture_output=True, text=True)
+        return parse_monitors(result.stdout)
 
     def get_wallpapers(self):
-        """Get list of wallpaper files from the configured directory."""
-        if not self.wallpaper_dir.exists():
-            logger.error(f"Wallpaper directory does not exist: {self.wallpaper_dir}")
-            return []
-
-        supported_formats = ['.jpg', '.jpeg', '.png', '.bmp', '.gif']
-        wallpapers = [
-            f for f in self.wallpaper_dir.iterdir()
-            if f.is_file() and f.suffix.lower() in supported_formats
-        ]
-
-        if not wallpapers:
-            logger.warning(f"No wallpapers found in {self.wallpaper_dir}")
-            return []
-
-        logger.info(f"Found {len(wallpapers)} wallpaper(s)")
-        return sorted(wallpapers)
-
-    def set_wallpaper_cinnamon(self, monitor, wallpaper_path):
-        """Set wallpaper for a monitor using Cinnamon settings."""
-        try:
-            # Get the geometry of the monitor
-            result = subprocess.run(
-                ['xrandr', '--query'],
-                capture_output=True,
-                text=True
-            )
-
-            # For Cinnamon, we'll use a slightly different approach
-            # Store per-monitor preferences
-            cmd = [
-                'gsettings', 'set', 'org.cinnamon.desktop.background',
-                'picture-uri', f'file://{wallpaper_path}'
-            ]
-            subprocess.run(cmd, check=False)
-            logger.info(f"Set wallpaper for {monitor}: {wallpaper_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Error setting wallpaper with Cinnamon: {e}")
-            return False
-
-    def set_wallpaper_generic(self, monitor, wallpaper_path):
-        """Set wallpaper using generic methods (feh, nitrogen, etc)."""
-        tools = [
-            (['feh', '--bg-fill', str(wallpaper_path)], "feh"),
-            (['nitrogen', '--set-zoom-fill', str(wallpaper_path)], "nitrogen"),
-            (['pcmanfm-qt', '--set-wallpaper=fill', str(wallpaper_path)], "pcmanfm-qt"),
-        ]
-
-        for cmd, tool_name in tools:
-            try:
-                subprocess.run(cmd, check=True, capture_output=True, timeout=5)
-                logger.info(f"Set wallpaper using {tool_name}: {wallpaper_path}")
-                return True
-            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        images = []
+        seen = set()
+        for path in sorted(self.wallpaper_dir.iterdir()):
+            if not path.is_file() or path.suffix.lower() not in self.supported_formats:
                 continue
-            except Exception as e:
-                logger.warning(f"Error with {tool_name}: {e}")
-                continue
-
-        logger.error("No wallpaper setting tool available")
-        return False
+            digest = hashlib.sha256()
+            with path.open("rb") as file:
+                for block in iter(lambda: file.read(1024 * 1024), b""):
+                    digest.update(block)
+            fingerprint = digest.digest()
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                images.append(path)
+        return images
 
     def rotate_wallpapers(self):
-        """Rotate wallpapers on all monitors."""
         monitors = self.get_monitors()
         wallpapers = self.get_wallpapers()
-
-        if not wallpapers:
-            logger.error("No wallpapers available for rotation")
-            return False
-
-        logger.info(f"Rotating wallpapers for {len(monitors)} monitor(s)")
-
+        selected = select_wallpapers(monitors, wallpapers, self.previous)
+        width = max(m.x + m.width for m in monitors)
+        height = max(m.y + m.height for m in monitors)
+        canvas = Image.new("RGB", (width, height), "black")
         for monitor in monitors:
-            wallpaper = random.choice(wallpapers)
-            success = self.set_wallpaper_cinnamon(monitor, wallpaper) or self.set_wallpaper_generic(monitor, wallpaper)
-            if not success:
-                logger.warning(f"Failed to set wallpaper for {monitor}")
+            with Image.open(selected[monitor.name]) as image:
+                image = ImageOps.exif_transpose(image).convert("RGB")
+                canvas.paste(ImageOps.fit(image, (monitor.width, monitor.height), method=Image.Resampling.LANCZOS),
+                             (monitor.x, monitor.y))
 
-        return True
-
-    def setup_signal_handlers(self):
-        """Setup signal handlers for graceful shutdown."""
-        def signal_handler(signum, frame):
-            logger.info("Received signal, shutting down gracefully")
-            sys.exit(0)
-
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        current = subprocess.run(["gsettings", "get", SCHEMA, "picture-uri"],
+                                 check=True, capture_output=True, text=True).stdout.strip().strip("'")
+        first = self.output_dir / "wallpaper-0.png"
+        second = self.output_dir / "wallpaper-1.png"
+        target = second if current == first.as_uri() else first
+        temporary = target.with_suffix(".tmp")
+        try:
+            canvas.save(temporary, format="PNG")
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        subprocess.run(["gsettings", "set", SCHEMA, "picture-options", "spanned"], check=True)
+        subprocess.run(["gsettings", "set", SCHEMA, "picture-uri", target.as_uri()], check=True)
+        self.previous = selected
+        for monitor in monitors:
+            logger.info("Monitor %s (%dx%d+%d+%d): %s", monitor.name, monitor.width,
+                        monitor.height, monitor.x, monitor.y, selected[monitor.name])
+        logger.info("Applied combined wallpaper %s", target)
 
     def run(self):
-        """Main loop for rotating wallpapers."""
-        logger.info("Wallpaper rotator started")
-        logger.info(f"Rotation interval: {self.rotation_interval} seconds ({self.rotation_interval // 60} minutes)")
-        logger.info(f"Wallpaper directory: {self.wallpaper_dir}")
-
-        # Initial rotation
-        self.rotate_wallpapers()
-
-        # Main loop
-        try:
-            while True:
-                time.sleep(self.rotation_interval)
+        logger.info("Wallpaper directory: %s; interval: %s seconds", self.wallpaper_dir, self.rotation_interval)
+        while True:
+            try:
                 self.rotate_wallpapers()
-        except KeyboardInterrupt:
-            logger.info("Wallpaper rotator stopped by user")
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}", exc_info=True)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                logger.error("Wallpaper rotation failed: %s", error, exc_info=True)
+            time.sleep(self.rotation_interval)
 
 
 def main():
-    """Main entry point."""
-    config_file = None
-    if len(sys.argv) > 1:
-        config_file = Path(sys.argv[1])
-
-    rotator = WallpaperRotator(config_file)
-    rotator.run()
+    log_file = Path.home() / ".local/share/wallpaper-rotation/rotator.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
+                        handlers=[logging.FileHandler(log_file), logging.StreamHandler()])
+    try:
+        WallpaperRotator(Path(sys.argv[1]) if len(sys.argv) > 1 else None).run()
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        logger.error("Cannot start wallpaper rotator: %s", error)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

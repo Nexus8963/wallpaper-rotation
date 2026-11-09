@@ -12,6 +12,17 @@ SERVICE_FILE="$SCRIPT_DIR/wallpaper-rotator.service"
 
 echo "Installing Wallpaper Rotator..."
 
+if ! python3 -c 'from PIL import Image; Image.Resampling.LANCZOS' >/dev/null 2>&1; then
+    echo "Python Pillow 9.1 or later is required. On Debian/Ubuntu install python3-pil." >&2
+    exit 1
+fi
+for command in xrandr gsettings; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        echo "Missing required command: $command" >&2
+        exit 1
+    fi
+done
+
 # Create necessary directories
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$SERVICE_DIR"
