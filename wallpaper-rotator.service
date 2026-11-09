@@ -1,0 +1,15 @@
+[Unit]
+Description=Multi-Monitor Wallpaper Rotator
+After=graphical-session-pre.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/wallpaper-rotator
+Restart=on-failure
+RestartSec=10
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=%h/.Xauthority"
+
+[Install]
+WantedBy=graphical-session.target

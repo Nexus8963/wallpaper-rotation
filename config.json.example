@@ -1,0 +1,5 @@
+{
+  "wallpaper_dir": "/home/hitch/wallpapers",
+  "rotation_interval": 600,
+  "supported_formats": [".jpg", ".jpeg", ".png", ".bmp", ".gif"]
+}
